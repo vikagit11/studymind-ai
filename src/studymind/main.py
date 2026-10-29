@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
-from studymind.infrastructure.llm.ollama_client import OllamaClient
+from studymind.infrastructure.llm.openai_client import OpenAIClient
 
 
 COLLECTION_NAME = "studymind_documents"
@@ -21,7 +21,7 @@ app = FastAPI(
 
 qdrant = QdrantClient(host="localhost", port=6333)
 embedding_client = EmbeddingClient()
-llm = OllamaClient()
+llm = OpenAIClient()
 
 
 class HealthResponse(BaseModel):
@@ -160,7 +160,10 @@ def ask_question(request: AskRequest):
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="Unable to process the question. Check that Ollama and Qdrant are running.",
+            detail=(
+                "Не удалось обработать вопрос. Проверь доступность Qdrant, "
+                "сервиса эмбеддингов и OpenAI API."
+            ),
         ) from exc
 UPLOAD_DIR = Path("data/uploads")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
