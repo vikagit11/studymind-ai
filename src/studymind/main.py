@@ -1,225 +1,89 @@
-import os
-from pathlib import Path
-from uuid import uuid4
-from studymind.rag.document_indexer import index_pdf
-from fastapi import UploadFile, File, Form
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue
-from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
-from studymind.infrastructure.llm.ollama_client import OllamaClient
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from studymind.api.routes import router
+from studymind.config import Settings, get_settings
+from studymind.infrastructure.embeddings.factory import build_embedder
+from studymind.infrastructure.qdrant_store import build_qdrant, ensure_collection
+from studymind.rag.service import StudyMindService
+
+logger = logging.getLogger(__name__)
 
 
-COLLECTION_NAME = "studymind_documents"
-
-app = FastAPI(
-    title="StudyMind AI",
-    description="AI study assistant with RAG",
-    version="0.1.0",
-)
-
-qdrant = QdrantClient(host="localhost", port=6333)
-embedding_client = EmbeddingClient()
-llm = OllamaClient()
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
-class HealthResponse(BaseModel):
-    status: str
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if getattr(app.state, "service", None) is not None:
+        yield
+        return
 
-
-
-class AskRequest(BaseModel):
-    question: str = Field(min_length=3, max_length=2000)
-    user_id: int = Field(gt=0)
-
-
-
-class Source(BaseModel):
-    document: str
-    page: int
-
-
-class AskResponse(BaseModel):
-    answer: str
-    sources: list[Source]
-
-
-@app.get("/")
-def root():
-    return {
-        "app": "StudyMind AI",
-        "message": "AI study assistant is running",
-    }
-
-
-@app.get("/health", response_model=HealthResponse)
-def health_check():
-    return {"status": "ok"}
-
-
-@app.post("/ask", response_model=AskResponse)
-def ask_question(request: AskRequest):
-    question = request.question.strip()
-
-    if not question:
-        raise HTTPException(
-            status_code=400,
-            detail="Question cannot be empty.",
-        )
+    settings: Settings = app.state.settings
+    qdrant = build_qdrant(settings)
+    embedder = build_embedder(settings)
+    app.state.qdrant = qdrant
+    app.state.embedder = embedder
 
     try:
-        query_vector = embedding_client.embed(question)
-
-        results = qdrant.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector,
-            query_filter=Filter(
-            must=[
-            FieldCondition(
-                key="user_id",
-                match=MatchValue(value=request.user_id),
-            )
-        ]
-    ),
-            limit=3,
-        ).points
-        print("Найденные фрагменты:", [(r.score, r.payload.get("source"), r.payload.get("text", "")[:150]) for r in results])
-        # Оставляем только достаточно релевантные фрагменты.
-        results = [
-            result
-            for result in results
-            if result.score >= 0.35
-        ]
-        if not results:
-            raise HTTPException(
-                status_code=404,
-                detail="No relevant document chunks found.",
-            )
-
-        context_parts = []
-        sources = set()
-
-        for result in results:
-            payload = result.payload or {}
-
-            text = payload.get("text")
-            if not text:
-                continue
-
-            document = payload.get("source", "Unknown")
-            page = payload.get("page")
-
-            context_parts.append(
-                f"Source: {document}\n"
-                f"PDF page: {page}\n"
-                f"Text:\n{text}"
-            )
-
-            if isinstance(page, int):
-                sources.add((document, page))
-
-        if not context_parts:
-            raise HTTPException(
-                status_code=404,
-                detail="No usable text found in search results.",
-            )
-
-        
-        prompt = f"""Ты — StudyMind AI, русскоязычный помощник по учебным материалам.
-
-Правила ответа:
-1. Всегда отвечай на русском языке, независимо от языка контекста.
-2. Отвечай на вопрос, используя предоставленный контекст.
-3. Не выдумывай факты и не приписывай контексту информацию, которой в нём нет.
-4. Если контекст не содержит достаточно информации для ответа, прямо скажи по-русски:
-   "В загруженных учебных материалах я не нашёл достаточно информации, чтобы ответить на этот вопрос."
-5. Не пытайся отвечать на вопросы, не связанные с найденным контекстом.
-6. Не добавляй список источников в текст ответа — источники возвращаются отдельно.
-
-        Контекст:
-        {"\n\n".join(context_parts)}
-
-        Вопрос:
-        {question}
-"""
-
-
-        answer = llm.generate(prompt)
-
-        return AskResponse(
-            answer=answer,
-            sources=[
-                Source(document=document, page=page)
-                for document, page in sorted(sources)
-            ],
-        )
-
-    except HTTPException:
-        raise
+        ensure_collection(qdrant, settings)
+        app.state.qdrant_status = "ok"
     except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Unable to process the question. Check that Ollama and Qdrant are running.",
-        ) from exc
-UPLOAD_DIR = Path("data/uploads")
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+        app.state.qdrant_status = "unavailable"
+        logger.warning("Qdrant недоступен при старте: %s", exc)
+
+    app.state.service = StudyMindService(
+        settings=settings,
+        qdrant=qdrant,
+        embedder=embedder,
+    )
+    logger.info(
+        "StudyMind запущен: llm=%s embeddings=%s mode=%s",
+        settings.llm_provider,
+        settings.embedding_provider,
+        settings.rag_mode,
+    )
+    yield
 
 
-@app.post("/upload")
-async def upload_pdf(
-    file: UploadFile = File(...),
-    user_id: int = Form(...),
-):
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Поддерживаются только PDF-файлы.",
+def create_app(
+    settings: Settings | None = None,
+    service=None,
+) -> FastAPI:
+    configure_logging()
+    app = FastAPI(
+        title="StudyMind AI",
+        description=(
+            "Учебный RAG-ассистент. Ответы можно получать через OpenAI "
+            "или локальную Ollama. Режим graph использует LangGraph, "
+            "режим chain — цепочку LangChain."
+        ),
+        version="0.2.0",
+        lifespan=lifespan,
+    )
+    app.state.settings = settings or get_settings()
+    app.state.service = service
+    app.state.qdrant_status = "skipped" if service is not None else "unknown"
+    app.include_router(router)
+
+    @app.middleware("http")
+    async def log_requests(request, call_next):
+        response = await call_next(request)
+        logger.info(
+            "%s %s -> %s",
+            request.method,
+            request.url.path,
+            response.status_code,
         )
+        return response
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    document_id = str(uuid4())
-    file_path = UPLOAD_DIR / f"{user_id}_{document_id}.pdf"
+    return app
 
-    try:
-        content = await file.read(MAX_FILE_SIZE + 1)
 
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail="Размер PDF не должен превышать 10 МБ.",
-            )
-
-        if not content:
-            raise HTTPException(
-                status_code=400,
-                detail="Файл пуст.",
-            )
-
-        file_path.write_bytes(content)
-
-        count = index_pdf(
-            pdf_path=str(file_path),
-            qdrant=qdrant,
-            embedding_client=embedding_client,
-            document_id=document_id,
-            user_id=user_id,
-        )
-
-        return {
-            "message": "PDF успешно загружен и проиндексирован.",
-            "document_id": document_id,
-            "chunks": count,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        if file_path.exists():
-            file_path.unlink()
-        raise HTTPException(
-            status_code=500,
-            detail="Не удалось обработать PDF.",
-        ) from exc
-    finally:
-        await file.close()
+app = create_app()

@@ -10,7 +10,6 @@ from qdrant_client.models import (
     PointStruct,
 )
 
-from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
 from studymind.rag.chunker import split_text
 from studymind.rag.pdf_parser import extract_pages
 
@@ -19,14 +18,34 @@ COLLECTION_NAME = "studymind_documents"
 VECTOR_SIZE = 768
 
 
+def embed_texts(embedding_client, texts: list[str]) -> list[list[float]]:
+    """Берёт пакетные эмбеддинги, если клиент их умеет, иначе считает по одному."""
+
+    if not texts:
+        return []
+
+    embed_many = getattr(embedding_client, "embed_many", None)
+    if callable(embed_many):
+        vectors = embed_many(texts)
+    else:
+        vectors = [embedding_client.embed(text) for text in texts]
+
+    if len(vectors) != len(texts):
+        raise ValueError("Эмбеддер вернул неверное число векторов.")
+    return vectors
+
+
 def index_pdf(
     pdf_path: str,
     qdrant: QdrantClient,
-    embedding_client: EmbeddingClient,
+    embedding_client,
     document_id: str,
     user_id: int,
+    vector_size: int | None = None,
+    collection_name: str = COLLECTION_NAME,
 ) -> int:
     path = Path(pdf_path)
+    expected_size = VECTOR_SIZE if vector_size is None else vector_size
 
     if not path.is_file():
         raise FileNotFoundError(f"PDF не найден: {path}")
@@ -35,56 +54,21 @@ def index_pdf(
         raise ValueError("Поддерживаются только PDF-файлы.")
 
     if document_id is None:
-        raise ValueError(
-            "Передайте постоянный document_id для документа."
-        )
+        raise ValueError("Передайте постоянный document_id для документа.")
 
-    if not qdrant.collection_exists(COLLECTION_NAME):
-        raise ValueError(
-            f"Коллекция {COLLECTION_NAME} не существует."
-        )
+    if not qdrant.collection_exists(collection_name):
+        raise ValueError(f"Коллекция {collection_name} не существует.")
 
     pages = extract_pages(str(path))
-
     if not pages:
-        raise ValueError(
-            f"Не удалось извлечь текст из {path.name}."
-        )
+        raise ValueError(f"Не удалось извлечь текст из {path.name}.")
 
-    # Запоминаем ID уже сохранённых chunks этой книги.
-    old_ids = set()
-    offset = None
-
-    
-    source_filter = Filter(
-    must=[
-        FieldCondition(
-            key="document_id",
-            match=MatchValue(value=document_id),
-        ),
-        FieldCondition(
-            key="user_id",
-            match=MatchValue(value=user_id),
-        ),
-    ]
-)
-
-
-    while True:
-        records, offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            scroll_filter=source_filter,
-            limit=500,
-            offset=offset,
-            with_payload=False,
-            with_vectors=False,
-        )
-
-        old_ids.update(record.id for record in records)
-
-        if offset is None:
-            break
-
+    old_ids = _existing_point_ids(
+        qdrant,
+        document_id,
+        user_id,
+        collection_name,
+    )
     points = []
 
     for page in pages:
@@ -93,14 +77,13 @@ def index_pdf(
             chunk_size=500,
             overlap_sentences=1,
         )
+        vectors = embed_texts(embedding_client, chunks)
 
-        for chunk_index, chunk in enumerate(chunks):
-            vector = embedding_client.embed(chunk)
-
-            if len(vector) != VECTOR_SIZE:
+        for chunk_index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            if len(vector) != expected_size:
                 raise ValueError(
                     f"Размерность embedding: {len(vector)}, "
-                    f"ожидалось {VECTOR_SIZE}."
+                    f"ожидалось {expected_size}."
                 )
 
             point_id = str(
@@ -109,7 +92,6 @@ def index_pdf(
                     f"{document_id}:{page['page']}:{chunk_index}",
                 )
             )
-
             points.append(
                 PointStruct(
                     id=point_id,
@@ -125,24 +107,56 @@ def index_pdf(
                 )
             )
 
-    # Сначала записываем новые chunks.
     qdrant.upsert(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         points=points,
         wait=True,
     )
 
-    # Удаляем только устаревшие ID этой книги.
     new_ids = {point.id for point in points}
     stale_ids = old_ids - new_ids
-
     if stale_ids:
         qdrant.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=PointIdsList(
-                points=list(stale_ids)
-            ),
+            collection_name=collection_name,
+            points_selector=PointIdsList(points=list(stale_ids)),
             wait=True,
         )
 
     return len(points)
+
+
+def _existing_point_ids(
+    qdrant: QdrantClient,
+    document_id: str,
+    user_id: int,
+    collection_name: str,
+) -> set:
+    old_ids = set()
+    offset = None
+    source_filter = Filter(
+        must=[
+            FieldCondition(
+                key="document_id",
+                match=MatchValue(value=document_id),
+            ),
+            FieldCondition(
+                key="user_id",
+                match=MatchValue(value=user_id),
+            ),
+        ]
+    )
+
+    while True:
+        records, offset = qdrant.scroll(
+            collection_name=collection_name,
+            scroll_filter=source_filter,
+            limit=500,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        old_ids.update(record.id for record in records)
+        if offset is None:
+            break
+
+    return old_ids
