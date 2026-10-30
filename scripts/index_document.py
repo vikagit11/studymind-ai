@@ -1,42 +1,29 @@
-
+import os
 from pathlib import Path
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from studymind.config import get_settings
+from studymind.infrastructure.embeddings.factory import build_embedder
+from studymind.infrastructure.qdrant_store import build_qdrant
+from studymind.rag.service import StudyMindService
 
-from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
-from studymind.rag.document_indexer import index_pdf
 
-
-COLLECTION_NAME = "studymind_documents"
 PDF_PATH = Path("data/machine_learning.pdf")
+DOCUMENT_ID = "machine_learning_book_v1"
+USER_ID = int(os.getenv("STUDYMIND_USER_ID", "5214477341"))
 
-qdrant = QdrantClient(host="localhost", port=6333)
-embedding_client = EmbeddingClient()
+settings = get_settings()
+service = StudyMindService(
+    settings=settings,
+    qdrant=build_qdrant(settings),
+    embedder=build_embedder(settings),
+)
 
-# Создаём коллекцию, только если её ещё нет.
-# Существующую коллекцию не удаляем.
-if not qdrant.collection_exists(COLLECTION_NAME):
-    qdrant.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(
-            size=768,
-            distance=Distance.COSINE,
-        ),
-    )
-
-# Используем постоянный ID для этой книги.
-# При повторном запуске chunks получат те же ID.
-document_id = "machine_learning_book_v1"
-
-count = index_pdf(
+count = service.index_document(
     pdf_path=str(PDF_PATH),
-    qdrant=qdrant,
-    embedding_client=embedding_client,
-    document_id=document_id,
-    user_id=5214477341,
+    document_id=DOCUMENT_ID,
+    user_id=USER_ID,
 )
 
 print(f"Загружено chunks: {count}")
-print("Индексация завершена!")
-
+print(f"Коллекция: {settings.qdrant_collection}")
+print(f"Эмбеддинги: {settings.embedding_provider} ({settings.embedding_dimensions})")

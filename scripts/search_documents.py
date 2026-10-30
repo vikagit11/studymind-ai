@@ -1,38 +1,27 @@
-from qdrant_client import QdrantClient
-
-from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
-
-
-COLLECTION_NAME = "studymind_documents"
+from studymind.config import get_settings
+from studymind.infrastructure.embeddings.factory import build_embedder
+from studymind.infrastructure.qdrant_store import build_qdrant
 
 
-qdrant = QdrantClient(
-    host="localhost",
-    port=6333,
-)
+QUESTION = "Почему возникает переобучение?"
 
-embedding_client = EmbeddingClient()
-
-
-question = "Почему возникает переобучение?"
-
-
-query_vector = embedding_client.embed(question)
-
+settings = get_settings()
+qdrant = build_qdrant(settings)
+embedder = build_embedder(settings)
+query_vector = embedder.embed(QUESTION)
 
 results = qdrant.query_points(
-    collection_name=COLLECTION_NAME,
+    collection_name=settings.qdrant_collection,
     query=query_vector,
     limit=3,
 ).points
 
-
-print("Вопрос:", question)
+print("Вопрос:", QUESTION)
 print("\nНайденные chunks:")
 
-
 for result in results:
+    payload = result.payload or {}
     print("\nScore:", result.score)
-    print("Страница:", result.payload["page"])
-    print("Текст:", result.payload["text"])
-    print("Источник:", result.payload["source"])
+    print("Страница:", payload.get("page"))
+    print("Текст:", payload.get("text"))
+    print("Источник:", payload.get("source"))

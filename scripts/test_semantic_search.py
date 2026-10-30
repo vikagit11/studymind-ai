@@ -1,38 +1,25 @@
-from qdrant_client import QdrantClient
-
-from studymind.infrastructure.embeddings.embedding_client import EmbeddingClient
-
-
-COLLECTION_NAME = "studymind_documents"
+from studymind.config import get_settings
+from studymind.infrastructure.embeddings.factory import build_embedder
+from studymind.infrastructure.qdrant_store import build_qdrant
 
 
-qdrant = QdrantClient(
-    host="localhost",
-    port=6333,
-)
+QUESTION = "Что такое Python?"
 
-embedding_client = EmbeddingClient()
+settings = get_settings()
+qdrant = build_qdrant(settings)
+embedder = build_embedder(settings)
+query_vector = embedder.embed(QUESTION)
 
-
-# Вопрос пользователя
-question = "Что такое Python?"
-
-
-# Превращаем вопрос в embedding
-query_vector = embedding_client.embed(question)
-
-
-# Ищем похожий вектор
 results = qdrant.query_points(
-    collection_name=COLLECTION_NAME,
+    collection_name=settings.qdrant_collection,
     query=query_vector,
     limit=1,
 ).points
 
-
 print("Результаты поиска:")
 
 for result in results:
+    payload = result.payload or {}
     print("Score:", result.score)
-    print("Text:", result.payload["text"])
-    print("Source:", result.payload["source"])
+    print("Text:", payload.get("text"))
+    print("Source:", payload.get("source"))
