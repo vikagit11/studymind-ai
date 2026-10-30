@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from studymind.config import Settings
 from studymind.errors import ProviderNotConfigured
+from tests.conftest import isolated_settings
 from studymind.main import create_app
 from studymind.rag.models import Answer, SourceRef
 
@@ -31,8 +31,8 @@ class FakeService:
         return self.answer_result
 
 
-def _client(service: FakeService, settings: Settings | None = None) -> TestClient:
-    app = create_app(settings=settings or Settings(), service=service)
+def _client(service: FakeService, settings=None) -> TestClient:
+    app = create_app(settings=settings or isolated_settings(), service=service)
     return TestClient(app)
 
 
