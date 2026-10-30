@@ -1,5 +1,9 @@
 # StudyMind AI
 
+> Актуальная документация и код с OpenAI, LangChain и LangGraph — в ветке
+> `feature/langgraph-multi-provider` (PR [#2](https://github.com/vikagit11/studymind-ai/pull/2)).
+> На `main` пока старый README и старая версия приложения, пока PR не смержен.
+
 StudyMind AI отвечает на вопросы по загруженным PDF. Поиск фрагментов идёт через Qdrant, а текст ответа пишет языковая модель: локальная Ollama или OpenAI. Переключается только модель ответа. Эмбеддинги остаются теми, которыми проиндексирована коллекция.
 
 ## Что умеет
@@ -115,15 +119,121 @@ curl -s http://127.0.0.1:8000/ask \
 
 `user_id` обязателен: поиск возвращает только чанки этого пользователя. В Telegram подставляется id пользователя.
 
-## Тесты
+## Как проверить, что всё работает
+
+### 1. Взять правильную ветку
+
+```bash
+git fetch origin
+git checkout feature/langgraph-multi-provider
+```
+
+Если смотришь README на GitHub, переключись с `main` на эту ветку или открой PR #2.
+
+### 2. Быстрая проверка без Ollama (логика и API)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m pytest
+```
+
+Все тесты должны пройти. Они не вызывают OpenAI, Ollama и Qdrant.
+
+### 3. Полная проверка с Ollama (локально, без GPT)
+
+1. Установи и запусти [Ollama](https://ollama.com/download).
+2. Скачай модели:
+
+```bash
+ollama pull qwen3:1.7b
+ollama pull embeddinggemma
+```
+
+3. Подними Qdrant:
+
+```bash
+docker compose up -d
+```
+
+4. Создай `.env` из примера и оставь провайдеры Ollama (см. блок выше).
+5. Запусти API:
+
+```bash
+uvicorn studymind.main:app --reload
+```
+
+6. Проверь health:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Ожидай `"status":"ok"` и `"qdrant":"ok"`. Если Qdrant или Ollama не запущены — `"degraded"` или ошибка на `/ask`.
+
+7. Загрузи PDF (подставь свой файл и тот же `user_id`, что в `/ask`):
+
+```bash
+curl -X POST http://127.0.0.1:8000/upload \
+  -F "user_id=1" \
+  -F "file=@/path/to/your/book.pdf;type=application/pdf"
+```
+
+8. Задай вопрос по документу:
+
+```bash
+curl -s http://127.0.0.1:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"О чём этот документ?","user_id":1,"provider":"ollama","mode":"graph"}'
+```
+
+В ответе должны быть поля `answer`, `sources`, `provider`, `mode`.
+
+Удобнее то же самое через Swagger: `http://127.0.0.1:8000/docs`.
+
+### 4. Проверка с OpenAI (ответы GPT, эмбеддинги Ollama)
+
+В `.env`:
+
+```env
+LLM_PROVIDER=openai
+EMBEDDING_PROVIDER=ollama
+OPENAI_API_KEY=sk-...
+```
+
+PDF индексируй **до** смены только если эмбеддинги уже были Ollama — коллекцию пересобирать не нужно. Затем тот же `/ask` с `"provider":"openai"`.
+
+Если ключа нет, API вернёт **400** с текстом про `OPENAI_API_KEY` — это нормальная проверка конфигурации.
+
+### 5. Telegram (необязательно)
+
+В `.env` задай `TELEGRAM_BOT_TOKEN`, запусти API и во втором терминале:
+
+```bash
+python -m studymind.telegram_bot
+```
+
+Отправь PDF боту, затем вопрос. Команды `/status`, `/provider openai`, `/mode chain`.
+
+### 6. Скрипты в `scripts/`
+
+| Скрипт | Что проверяет |
+|--------|----------------|
+| `scripts/test_ollama.py` | чат Ollama |
+| `scripts/test_embeddings.py` | эмбеддинги Ollama |
+| `scripts/test_qdrant.py` | подключение к Qdrant |
+| `scripts/index_document.py` | индекс PDF из `data/` (нужен файл) |
+| `scripts/rag.py` | один вопрос через `StudyMindService` |
+
+## Тесты (кратко)
 
 ```bash
 python -m pytest
 ```
 
 Тесты не ходят в OpenAI, Ollama и Qdrant. Модель и поиск подменяются: проверяются маршруты графа, отказ без контекста, выбор провайдера и ответы API.
-
-Скрипты в `scripts/` — ручные проверки по уже загруженному PDF. `scripts/test_ollama.py` и `scripts/test_embeddings.py` бьют в Ollama напрямую. Остальные берут провайдер из `.env`.
 
 ## Что здесь уровня middle
 
